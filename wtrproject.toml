@@ -14,6 +14,7 @@ packages = [
     "Trajectory::MotorTrajectory",
     "VelocityProfile::Core",
     "VelocityProfile::SCurve",
+    "bsp::GPIO_Driver",
     "libs::Concurrency",
     "utils",
 ]

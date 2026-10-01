@@ -29,6 +29,7 @@ set(WTR_MANAGED_PACKAGE_DIRS
     Modules/BasicComponents/libs/control/pid_pd
     Modules/TrajectoryControl/MotorTrajectory
     Modules/TrajectoryControl/HomingMotorTrajectory
+    Modules/BasicComponents/bsp/gpio_driver
 )
 
 foreach(_wtr_package_dir IN LISTS WTR_MANAGED_PACKAGE_DIRS)
@@ -51,6 +52,7 @@ set(WTR_DIRECT_PACKAGE_TARGETS
     Trajectory::MotorTrajectory
     VelocityProfile::Core
     VelocityProfile::SCurve
+    bsp::GPIO_Driver
     libs::Concurrency
     utils
 )
@@ -71,6 +73,7 @@ set(WTR_RESOLVED_PACKAGE_TARGETS
     libs::PID_PD
     Trajectory::MotorTrajectory
     Trajectory::HomingMotorTrajectory
+    bsp::GPIO_Driver
     stm32cubemx
 )
 

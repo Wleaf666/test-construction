@@ -8,34 +8,45 @@
 #include "tim.h"
 #include "watchdog.hpp"
 
-namespace
-{
-const bsp::gpio::GpioPinOutput fixed_gripper_gpio{ fixed_hripper_GPIO_Port, fixed_hripper_Pin };
-const bsp::gpio::GpioPinOutput moving_gripper_gpio{ moving_hripper_GPIO_Port, moving_hripper_Pin };
-} // namespace
+// 应用侧GPIO句柄使用的引脚宏，仅在本编译单元生效。
+// Core/Src/gpio.c仍需CubeMX在main.h生成同名引脚宏，不能由此处替代。
+#define fixed_hripper_Pin        GPIO_PIN_0
+#define fixed_hripper_GPIO_Port  GPIOC
+#define moving_hripper_Pin       GPIO_PIN_1
+#define moving_hripper_GPIO_Port GPIOC
+
+// 句柄只保存端口和引脚；时钟、模式及初始低电平仍由MX_GPIO_Init配置。
+bsp::gpio::GpioPinOutput fixed_gripper_gpio{ fixed_hripper_GPIO_Port, fixed_hripper_Pin };
+bsp::gpio::GpioPinOutput moving_gripper_gpio{ moving_hripper_GPIO_Port, moving_hripper_Pin };
 
 // 应用只负责参数、设备实例及调度。CubeMX负责外设和中断优先级配置。
 device::Lift* lift = nullptr;
 device::Flip* flip = nullptr;
 
-// 保留当前调参值：速度PID 1kHz，位置PD 500Hz，轨迹100Hz。
-// 参数在实例构造时复制到库；初始化后修改这些变量不会自动更新设备内部参数。
-PIDMotor::Config                              lift_pid{ 200.0f, 3.0f, 0.0f, 16384.0f * 0.75f };
-PIDMotor::Config                              flip_pid{ 200.0f, 3.0f, 0.0f, 16384.0f * 0.75f };
-PD::Config                                    lift_pd{ 5.0f, 25.0f, 450.0f };
-PD::Config                                    flip_pd{ 5.0f, 25.0f, 450.0f };
+// 当前生成配置：TIM6速度PID/CAN发送1kHz，TIM3位置PD实际200Hz，TIM2轨迹100Hz。
+// 若要位置PD 500Hz，在CubeMX将TIM3的ARR改为2000-1；回调名称不决定频率。
+// 以下为当前调参值，并非实物验证结论。构造时复制到库，运行中改配置变量不会自动生效。
+PIDMotor::Config lift_pid{ 200.0f, 3.0f, 0.0f, 16384.0f * 0.75f };
+PIDMotor::Config flip_pid{ 200.0f, 3.0f, 0.0f, 16384.0f * 0.75f };
+// 速度环电流上限为12288个C620协议单位，对应15A转矩电流指令，不是电源输入电流。
+PD::Config lift_pd{ 5.0f, 25.0f, 450.0f };
+PD::Config flip_pd{ 5.0f, 25.0f, 450.0f };
+// 轨迹参数单位依次为deg/s、deg/s²、deg/s³；升降按2.25deg/mm换算。
 trajectory::MotorTrajectory<1>::ProfileConfig lift_profile{ 22.5f, 45.0f, 225.0f };
 trajectory::MotorTrajectory<1>::ProfileConfig flip_profile{ 30.0f, 60.0f, 300.0f };
 
-// Ozone示例：先设零、使能，再运动；等command回到None再提交下一条。
+// Ozone：每台设备分别在静止、失能状态设零，再使能；每条命令处理清零后再发下一条。
 // lift->command = device::Command::SetZero; // 1
 // lift->command = device::Command::Enable;  // 2
 // lift->distance_mm = 20.0f;
 // lift->command = device::Command::Move;    // 4，相对上移20mm（先验证方向）
+// flip->command = device::Command::SetZero;
+// flip->command = device::Command::Enable;
 // flip->target_deg = 180.0f;                // 回程写0
 // flip->command = device::Command::Move;
 // 其余命令：None=0、Disable=3、Stop=5。Stop是当前位置保持，不是减速轨迹。
-// 观察lift/flip的result、zeroed、busy，以及position_mm / position_deg。
+// result=Ok仅表示命令接受；正常到位后busy清零，但Stop/Disable/失联也会清零。
+// 联合观察result、zeroed、busy及position_mm / position_deg，不能只凭busy判断到位。
 volatile bool fixed_gripper_closed  = false;
 volatile bool moving_gripper_closed = false;
 
@@ -66,6 +77,7 @@ void motor_init()
             flip_pd,
             flip_profile);
 }
+// true输出高电平使阀通电闭合，false输出低电平打开；变量不是气缸到位反馈。
 
 void gripper_update()
 {
@@ -73,13 +85,15 @@ void gripper_update()
     moving_gripper_gpio.write(moving_gripper_closed ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
-void motorProfileUpadta_Tim100(TIM_HandleTypeDef*)
+// TIM2当前100Hz，轨迹每次推进10ms，并检查位置误差和速度是否满足到位条件。
+void motorProfileUpadta_Tim100HZ(TIM_HandleTypeDef*)
 {
     lift->profileUpdate(0.01f);
     flip->profileUpdate(0.01f);
 }
 
-void motorCurrentUpadta_Tim1k(TIM_HandleTypeDef*)
+// TIM6当前1kHz，软件看门狗每1ms递减，两台速度PID更新后聚合发送一帧电流。
+void motorCurrentUpadta_Tim1kHZ(TIM_HandleTypeDef*)
 {
     service::Watchdog::EatAll();
     lift->controllerUpdate();
@@ -87,7 +101,8 @@ void motorCurrentUpadta_Tim1k(TIM_HandleTypeDef*)
     motors::DJIMotor::SendIqCommand(&hcan1, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_1_4);
 }
 
-void motorErrorUpadta_Tim500(TIM_HandleTypeDef*)
+// 保留现有函数名；实际频率取决于TIM3，当前生成配置为200Hz而非500Hz。
+void motorErrorUpadta_Tim500HZ(TIM_HandleTypeDef*)
 {
     lift->errorUpdate();
     flip->errorUpdate();
@@ -95,11 +110,11 @@ void motorErrorUpadta_Tim500(TIM_HandleTypeDef*)
 
 void tim_init()
 {
-    HAL_TIM_RegisterCallback(&htim2, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorProfileUpadta_Tim100);
+    HAL_TIM_RegisterCallback(&htim2, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorProfileUpadta_Tim100HZ);
     HAL_TIM_Base_Start_IT(&htim2);
-    HAL_TIM_RegisterCallback(&htim6, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorCurrentUpadta_Tim1k);
+    HAL_TIM_RegisterCallback(&htim6, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorCurrentUpadta_Tim1kHZ);
     HAL_TIM_Base_Start_IT(&htim6);
-    HAL_TIM_RegisterCallback(&htim3, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorErrorUpadta_Tim500);
+    HAL_TIM_RegisterCallback(&htim3, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorErrorUpadta_Tim500HZ);
     HAL_TIM_Base_Start_IT(&htim3);
 }
 
@@ -137,7 +152,7 @@ extern "C" void Init(void*)
     CAN_Start(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
     tim_init();
 
-    // 两个命令任务需要执行S曲线规划，明确预留栈空间；任务只在Init中创建。
+    // S曲线规划在命令任务执行，不在定时器中断规划；栈大小以字节计，仍需上板检查余量。
     osThreadAttr_t command_task_attr{};
     command_task_attr.priority   = osPriorityNormal;
     command_task_attr.stack_size = 4096;
